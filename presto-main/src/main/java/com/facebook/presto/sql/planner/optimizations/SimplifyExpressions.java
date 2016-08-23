@@ -16,6 +16,7 @@ package com.facebook.presto.sql.planner.optimizations;
 import com.facebook.presto.Session;
 import com.facebook.presto.metadata.Metadata;
 import com.facebook.presto.spi.type.Type;
+import com.facebook.presto.spi.type.TypeSignature;
 import com.facebook.presto.sql.parser.SqlParser;
 import com.facebook.presto.sql.planner.DeterminismEvaluator;
 import com.facebook.presto.sql.planner.ExpressionInterpreter;
@@ -25,26 +26,26 @@ import com.facebook.presto.sql.planner.PlanNodeIdAllocator;
 import com.facebook.presto.sql.planner.Symbol;
 import com.facebook.presto.sql.planner.SymbolAllocator;
 import com.facebook.presto.sql.planner.plan.FilterNode;
+import com.facebook.presto.sql.planner.plan.OutputNode;
 import com.facebook.presto.sql.planner.plan.PlanNode;
 import com.facebook.presto.sql.planner.plan.ProjectNode;
 import com.facebook.presto.sql.planner.plan.SimplePlanRewriter;
 import com.facebook.presto.sql.planner.plan.TableScanNode;
 import com.facebook.presto.sql.planner.plan.ValuesNode;
+import com.facebook.presto.sql.tree.Cast;
 import com.facebook.presto.sql.tree.ComparisonExpression;
 import com.facebook.presto.sql.tree.Expression;
 import com.facebook.presto.sql.tree.ExpressionRewriter;
 import com.facebook.presto.sql.tree.ExpressionTreeRewriter;
+import com.facebook.presto.sql.tree.GenericLiteral;
 import com.facebook.presto.sql.tree.LogicalBinaryExpression;
 import com.facebook.presto.sql.tree.NotExpression;
 import com.facebook.presto.sql.tree.NullLiteral;
 import com.facebook.presto.sql.tree.SymbolReference;
-import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
-import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Maps;
-import com.google.common.collect.Sets;
+import com.google.common.collect.*;
 
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -105,10 +106,18 @@ public class SimplifyExpressions
         }
 
         @Override
+        public PlanNode visitOutput(OutputNode node, RewriteContext<Void> context)
+        {
+            PlanNode source = context.rewrite(node.getSource());
+            return new OutputNode(node.getId(), source, node.getColumnNames(), node.getOutputSymbols());
+        }
+
+        @Override
         public PlanNode visitProject(ProjectNode node, RewriteContext<Void> context)
         {
             PlanNode source = context.rewrite(node.getSource());
             Map<Symbol, Expression> assignments = ImmutableMap.copyOf(Maps.transformValues(node.getAssignments(), this::simplifyExpression));
+            assignments = removeIdentityCasts(assignments);
             return new ProjectNode(node.getId(), source, assignments);
         }
 
@@ -155,6 +164,42 @@ public class SimplifyExpressions
             IdentityHashMap<Expression, Type> expressionTypes = getExpressionTypes(session, metadata, sqlParser, types, expression, emptyList() /* parameters already replaced */);
             ExpressionInterpreter interpreter = ExpressionInterpreter.expressionOptimizer(expression, metadata, session, expressionTypes);
             return LiteralInterpreter.toExpression(interpreter.optimize(NoOpSymbolResolver.INSTANCE), expressionTypes.get(expression));
+        }
+
+        private Map<Symbol, Expression> removeIdentityCasts(Map<Symbol, Expression> assignments)
+        {
+            Map<Symbol, Expression> newAssignments = new HashMap<>();
+            for (Map.Entry<Symbol, Expression> assignment : assignments.entrySet()) {
+                Symbol assignmentSymbol = assignment.getKey();
+                Expression expression = assignment.getValue();
+                if (expression instanceof Cast) {
+                    Expression expressionToCast = ((Cast) expression).getExpression();
+                    TypeSignature typeOfExpressionToCastTo = types.get(assignmentSymbol).getTypeSignature();
+                    TypeSignature typeOfExpressionToCast;
+                    if (expressionToCast instanceof SymbolReference) {
+                        Symbol expressionSymbol = new Symbol(((SymbolReference) expressionToCast).getName());
+                        typeOfExpressionToCast = types.get(expressionSymbol).getTypeSignature();
+                    }
+                    else if (expressionToCast instanceof GenericLiteral) {
+                        typeOfExpressionToCast = new TypeSignature(((GenericLiteral) expressionToCast).getType());
+                    }
+                    else {
+                        newAssignments.put(assignmentSymbol, expression);
+                        continue;
+                    }
+
+                    if (typeOfExpressionToCast.equals(typeOfExpressionToCastTo)) {
+                        newAssignments.put(assignmentSymbol, expressionToCast);
+                    }
+                    else {
+                        newAssignments.put(assignmentSymbol, expression);
+                    }
+                }
+                else {
+                    newAssignments.put(assignmentSymbol, expression);
+                }
+            }
+            return newAssignments;
         }
     }
 

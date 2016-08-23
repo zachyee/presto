@@ -33,7 +33,18 @@ public final class PlanAssert
         boolean matches = actual.getRoot().accept(new PlanMatchingVisitor(session, metadata), new PlanMatchingContext(pattern));
         if (!matches) {
             String logicalPlan = textLogicalPlan(actual.getRoot(), actual.getTypes(), metadata, session);
-            assertTrue(matches, format("Plan does not match:\n %s\n, to pattern:\n%s", logicalPlan, pattern));
+            assertTrue(false, format("Plan does not match:\n %s\n, to pattern:\n%s", logicalPlan, pattern));
+        }
+    }
+
+    public static void assertNotPlan(Session session, Metadata metadata, Plan actual, PlanMatchPattern pattern)
+    {
+        requireNonNull(actual, "root is null");
+
+        boolean matches = actual.getRoot().accept(new PlanMatchingVisitor(session, metadata), new PlanMatchingContext(pattern));
+        if (matches) {
+            String logicalPlan = textLogicalPlan(actual.getRoot(), actual.getTypes(), metadata, session);
+            assertTrue(false, format("Plan matches:\n%s\nto pattern:\n%s", logicalPlan, pattern));
         }
     }
 }
